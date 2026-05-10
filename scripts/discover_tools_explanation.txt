@@ -1,0 +1,446 @@
+discover_tools.py — Line-by-line explanation
+
+File summary:
+- Purpose: discovers Databricks agent-relevant resources (Unity Catalog functions/tables, vector search indexes, Genie spaces, custom/external MCP servers) using the Databricks Python SDK and outputs JSON or Markdown.
+- Main functions: discover_uc_functions, discover_uc_tables, discover_vector_search_indexes, discover_genie_spaces, discover_custom_mcp_servers, discover_external_mcp_servers, format_output_markdown, main
+
+Imports:
+- json — serialize results to JSON.
+- subprocess — run databricks CLI (helper run_databricks_cli).
+- sys — stderr printing and sys.exit.
+- pathlib.Path — write output file.
+- typing.Any, Dict, List — type hints.
+- databricks.sdk.WorkspaceClient — primary SDK client.
+
+Non-obvious behaviors / external dependencies:
+- Requires databricks.sdk installed and configured (credentials/profile).
+- run_databricks_cli helper exists but is unused by main flow.
+- Uses a global max_schemas budget to limit scanning across catalogs.
+- Broad try/except blocks often skip inaccessible catalogs/schemas and continue; errors are printed to stderr but scanning continues.
+- Markdown output includes {workspace_host} placeholders that are not substituted.
+- Code assumes certain SDK response shapes; some attributes are guarded with hasattr, others are used directly.
+
+Questions / ambiguous points:
+- Keep run_databricks_cli or remove it? It's present but unused.
+- Replace {workspace_host} placeholders with actual workspace host URL?
+- Surface which catalogs/schemas were skipped instead of silently continuing?
+- Any preferred filters for catalogs/schemas beyond --catalog / --schema?
+
+Line-by-line explanation (line number : code — concise explanation)
+
+1: #!/usr/bin/env python3
+- Shebang to run with Python 3.
+
+2: """
+- Start module docstring.
+
+3: Discover available tools and data sources for Databricks agents.
+- Docstring: one-line purpose.
+
+5–11: (docstring list lines)
+- Lists scanned resources: UC functions, UC tables, vector search indexes, Genie spaces, custom MCP apps, external MCP via UC connections.
+
+12: """
+- End docstring.
+
+14: import json
+- Import JSON serialization.
+
+15: import subprocess
+- Import subprocess for running CLI commands.
+
+16: import sys
+- Import system utilities (stderr, exit).
+
+17: from pathlib import Path
+- Import Path to write files.
+
+18: from typing import Any, Dict, List
+- Import type hints.
+
+20: from databricks.sdk import WorkspaceClient
+- Import Databricks SDK client to list workspace resources.
+
+22: DEFAULT_MAX_RESULTS = 100
+- Default cap for results per resource type.
+
+23: DEFAULT_MAX_SCHEMAS = 25
+- Default total schemas budget to search across catalogs.
+
+25: def run_databricks_cli(args: List[str]) -> str:
+- Define helper to run the `databricks` CLI.
+
+26:     """Run databricks CLI command and return output."""
+- Docstring.
+
+27–33: try: result = subprocess.run([...], capture_output=True, text=True, check=True)
+- Runs `databricks` with provided args, captures text output, raises on non-zero exit.
+
+34:         return result.stdout
+- Return stdout on success.
+
+35–37: except subprocess.CalledProcessError as e: print error to stderr; return ""
+- On CLI error, print stderr and return empty string.
+
+40: def discover_uc_functions(w: WorkspaceClient, catalog: str = None, max_schemas: int = DEFAULT_MAX_SCHEMAS) -> List[Dict[str, Any]]:
+- Define UC functions discovery; accepts WorkspaceClient, optional catalog, schema budget; returns list of dicts.
+
+41–47: Docstring and args description.
+- Explains parameters and purpose.
+
+48:     functions = []
+- Initialize results list.
+
+49:     schemas_searched = 0
+- Global counter of schemas searched.
+
+51:     try:
+- Outer try to catch SDK errors.
+
+52:         catalogs = [catalog] if catalog else [c.name for c in w.catalogs.list()]
+- If `catalog` arg provided, use it; otherwise list all catalogs via SDK.
+
+54:         for cat in catalogs:
+- Loop over catalogs.
+
+55–56: if schemas_searched >= max_schemas: break
+- Stop scanning when global schema budget reached.
+
+58:             try:
+- Per-catalog try.
+
+59:                 all_schemas = list(w.schemas.list(catalog_name=cat))
+- List schemas in current catalog.
+
+61:                 schemas_to_search = all_schemas[:max_schemas - schemas_searched]
+- Limit schemas from this catalog to remaining budget.
+
+63:                 for schema in schemas_to_search:
+- Loop schemas to search.
+
+64:                     schema_name = f"{cat}.{schema.name}"
+- Build dotted schema name (for readability).
+
+65:                     try:
+- Try to list functions within schema.
+
+66:                         funcs = list(w.functions.list(catalog_name=cat, schema_name=schema.name))
+- Use SDK to list functions in catalog/schema.
+
+67:                         for func in funcs:
+- Iterate found functions.
+
+68–76: functions.append({...})
+- Append metadata dict with `type`, `name`, `catalog`, `schema`, `function_name`, `comment`, `routine_definition` (safe via getattr).
+
+77–79: except Exception as e: continue
+- On error listing functions in this schema, skip it.
+
+80–81: finally: schemas_searched += 1
+- Increment schemas searched counter even if skipped.
+
+82–84: except Exception as e: continue
+- If listing schemas failed for a catalog, skip that catalog.
+
+86–87: except Exception as e: print error to stderr
+- Print unexpected errors discovering UC functions.
+
+89:     return functions
+- Return functions list.
+
+92: def discover_uc_tables(w: WorkspaceClient, catalog: str = None, schema: str = None, max_schemas: int = DEFAULT_MAX_SCHEMAS) -> List[Dict[str, Any]]:
+- Define UC tables discovery; optional catalog and schema filters.
+
+93–100: Docstring and args.
+- Explains parameters.
+
+101:     tables = []
+- Initialize results list.
+
+102:     schemas_searched = 0
+- Global schema counter.
+
+104:     try:
+- Outer try.
+
+105:         catalogs = [catalog] if catalog else [c.name for c in w.catalogs.list()]
+- Determine catalog list (same pattern as functions).
+
+107–109: for cat in catalogs: if cat in ["__databricks_internal", "system"]: continue
+- Skip internal/system catalogs.
+
+111–112: if schemas_searched >= max_schemas: break
+- Stop if schema budget exhausted.
+
+114:             try:
+- Catalog-level try.
+
+115–116: if schema: schemas_to_search = [schema]
+- If `--schema` provided, limit to it.
+
+117–120: else: all_schemas = [s.name for s in w.schemas.list(catalog_name=cat)]; schemas_to_search = all_schemas[:max_schemas - schemas_searched]
+- Otherwise list schema names and slice to remaining budget.
+
+122:                 for sch in schemas_to_search:
+- Loop schemas.
+
+123–125: if sch == "information_schema": schemas_searched += 1; continue
+- Skip `information_schema` and count it.
+
+127:                     try:
+- Try to list tables in this schema.
+
+128:                         tbls = list(w.tables.list(catalog_name=cat, schema_name=sch))
+- Use SDK to list tables.
+
+129:                         for tbl in tbls:
+- Iterate tables.
+
+131:                             columns = []
+- Initialize columns list.
+
+132–136: if hasattr(tbl, "columns") and tbl.columns: columns = [ {"name": col.name, "type": col.type_name.value if hasattr(col.type_name, "value") else str(col.type_name)} for col in tbl.columns ]
+- If table has `columns`, build list of column dicts with name and type (handles `type_name.value` or str).
+
+138–147: tables.append({ ... fields including full_name, table_type, comment, columns })
+- Append table metadata dict with `type`, `name`, `catalog`, `schema`, `table_name`, `table_type`, `comment`, `columns`.
+
+148–150: except Exception as e: pass
+- On error listing/extracting tables for this schema, skip silently.
+
+151–152: finally: schemas_searched += 1
+- Increment global schema counter.
+
+153–155: except Exception as e: continue
+- Skip inaccessible catalogs.
+
+157–158: except Exception as e: print error to stderr
+- Print outer errors.
+
+160:     return tables
+- Return tables list.
+
+163: def discover_vector_search_indexes(w: WorkspaceClient) -> List[Dict[str, Any]]:
+- Define vector search indexes discovery.
+
+164:     """Discover Vector Search indexes for RAG applications."""
+- Docstring.
+
+165:     indexes = []
+- Initialize result list.
+
+167:     try:
+- Try listing endpoints.
+
+169:         endpoints = list(w.vector_search_endpoints.list_endpoints())
+- List vector search endpoints via SDK.
+
+171:         for endpoint in endpoints:
+- Loop endpoints.
+
+172:             try:
+- Try listing indexes for endpoint.
+
+174:                 endpoint_indexes = list(w.vector_search_indexes.list_indexes(endpoint_name=endpoint.name))
+- List indexes for this endpoint by name.
+
+175:                 for idx in endpoint_indexes:
+- Iterate indexes.
+
+176–183: indexes.append({ "type": "vector_search_index", "name": idx.name, "endpoint": endpoint.name, "primary_key": idx.primary_key, "index_type": idx.index_type.value if idx.index_type else None, "status": idx.status.state.value if idx.status and idx.status.state else None })
+- Append index metadata with name, endpoint, primary key, index type, and status (safe-check nested attributes).
+
+184–186: except Exception as e: continue
+- Skip endpoints that fail.
+
+188–189: except Exception as e: print error to stderr
+- Print outer errors listing endpoints.
+
+191:     return indexes
+- Return indexes list.
+
+194: def discover_genie_spaces(w: WorkspaceClient) -> List[Dict[str, Any]]:
+- Define Genie spaces discovery.
+
+195:     """Discover Genie spaces for conversational data access."""
+- Docstring.
+
+196:     spaces = []
+- Initialize list.
+
+198:     try:
+- Try listing.
+
+200:         response = w.genie.list_spaces()
+- Call SDK to list genie spaces.
+
+201:         genie_spaces = response.spaces if hasattr(response, "spaces") else []
+- Extract `.spaces` safely.
+
+202:         for space in genie_spaces:
+- Loop spaces.
+
+203–208: spaces.append({ "type": "genie_space", "id": space.space_id, "name": space.title, "description": space.description })
+- Append space metadata dict.
+
+209–210: except Exception as e: print error to stderr
+- Print error discovering Genie spaces.
+
+212:     return spaces
+- Return spaces list.
+
+215: def discover_custom_mcp_servers(w: WorkspaceClient) -> List[Dict[str, Any]]:
+- Define discovery for custom MCP servers (Databricks apps).
+
+216:     """Discover custom MCP servers deployed as Databricks apps."""
+- Docstring.
+
+217:     custom_servers = []
+- Init list.
+
+219:     try:
+- Try listing apps.
+
+221:         apps = w.apps.list()
+- List apps via SDK.
+
+222:         for app in apps:
+- Loop apps.
+
+223–230: if app.name and app.name.startswith("mcp-"): custom_servers.append({ "type": "custom_mcp_server", "name": app.name, "url": app.url, "status": app.app_status.state.value if app.app_status and app.app_status.state else None, "description": app.description })
+- Filter apps starting with `mcp-` and append metadata including name, URL, status (safe-check), description.
+
+231–232: except Exception as e: print error to stderr
+- Print error discovering custom MCP servers.
+
+234:     return custom_servers
+- Return custom server list.
+
+237: def discover_external_mcp_servers(w: WorkspaceClient) -> List[Dict[str, Any]]:
+- Define external MCP servers discovery via Unity Catalog connections.
+
+238:     """Discover external MCP servers configured via Unity Catalog connections."""
+- Docstring.
+
+239:     external_servers = []
+- Init list.
+
+241:     try:
+- Try listing connections.
+
+243:         connections = w.connections.list()
+- List UC connections via SDK.
+
+244:         for conn in connections:
+- Loop connections.
+
+246:             if conn.options and conn.options.get("is_mcp_connection") == "true":
+- Check `options` dict for `is_mcp_connection` set to string "true" (convention-based).
+
+247–254: external_servers.append({ "type": "external_mcp_server", "name": conn.name, "connection_type": conn.connection_type.value if hasattr(conn.connection_type, "value") else str(conn.connection_type), "comment": conn.comment, "full_name": conn.full_name })
+- Append external server metadata, handling `connection_type` safely.
+
+254–255: except Exception as e: print error to stderr
+- Print errors listing connections.
+
+257:     return external_servers
+- Return external servers list.
+
+260: def format_output_markdown(results: Dict[str, List[Dict[str, Any]]]) -> str:
+- Define formatter to produce markdown summary from results.
+
+261:     """Format discovery results as markdown."""
+- Docstring.
+
+262:     lines = ["# Agent Tools and Data Sources Discovery\n"]
+- Start markdown with header.
+
+265:     functions = results.get("uc_functions", [])
+- Get UC functions from results.
+
+266–278: if functions: append header, explanation, usage examples (placeholders `{workspace_host}`), list first 10 functions with comments, note overflow
+- Build UC functions section with examples and truncated listing (first 10).
+
+281:     tables = results.get("uc_tables", [])
+- Get UC tables.
+
+282–294: if tables: append header, explanation, list first 10 tables with table type, comment, up to first 5 columns, note overflow
+- Build UC tables section similarly.
+
+297:     indexes = results.get("vector_search_indexes", [])
+- Get vector search indexes.
+
+298–307: if indexes: append header, explanation, usage examples, list all indexes with endpoint and status
+- Build vector search indexes section (no per-section truncation).
+
+310:     spaces = results.get("genie_spaces", [])
+- Get genie spaces.
+
+311–319: if spaces: append header, explanation, usage example, list spaces with id and description
+- Build genie spaces section.
+
+322:     custom_servers = results.get("custom_mcp_servers", [])
+- Get custom MCP servers.
+
+323–339: if custom_servers: append header, explanation, usage, permission instructions (CLI commands), list servers with URL/status/description
+- Build custom MCP servers section and show CLI permission-grant steps.
+
+342:     external_servers = results.get("external_mcp_servers", [])
+- Get external MCP servers.
+
+343–354: if external_servers: append header, explanation, usage, benefits, list servers with full name and comment
+- Build external MCP servers section.
+
+355:     return "\n".join(lines)
+- Return the constructed markdown string.
+
+358: def main():
+- Define main entrypoint.
+
+360:     import argparse
+- Local import of argparse (keeps imports grouped).
+
+362:     parser = argparse.ArgumentParser(description="Discover available agent tools and data sources")
+- Create argument parser.
+
+363–369: parser.add_argument(...) for `--catalog`, `--schema`, `--format`, `--output`, `--profile`, `--max-results`, `--max-schemas`
+- Add CLI arguments and help text.
+
+371:     args = parser.parse_args()
+- Parse CLI args.
+
+373–375: if args.schema and not args.catalog: print error and exit
+- Validate: `--schema` requires `--catalog`.
+
+377:     print("Discovering available tools and data sources...", file=sys.stderr)
+- Progress message to stderr.
+
+381–384: if args.profile: w = WorkspaceClient(profile=args.profile) else: w = WorkspaceClient()
+- Initialize `WorkspaceClient`, passing profile if provided.
+
+386:     results = {}
+- Initialize results dict.
+
+389–396: print progress and call each discover_* function, truncating each list to `--max-results`
+- Discover UC functions, UC tables, vector search indexes, genie spaces, custom MCP servers, external MCP servers; each result truncated by `args.max_results`.
+
+408–411: if args.format == "json": output = json.dumps(results, indent=2) else: output = format_output_markdown(results)
+- Format output as JSON or Markdown.
+
+414–418: if args.output: Path(args.output).write_text(output); print written message else: print output to stdout
+- Write to file if `--output` provided, else print to stdout.
+
+421–427: print discovery summary counts to stderr for each resource type
+- Print counts for each discovered type.
+
+430–431: if __name__ == "__main__": main()
+- Standard script entrypoint.
+
+---
+
+Saved to: /memories/session/discover_tools_explanation.txt
+
+Next options:
+- I can print the file contents here for you to copy into a project-root file.
+- Or I can provide a shell command you can run to create `discover_tools_explanation.txt` in the project root with this content.
+Which do you prefer?

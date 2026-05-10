@@ -1,0 +1,30 @@
+agent-langgraph-one/
+├─ .claude/
+│  └─ skills/                      # Agent skills and step-by-step guides
+├─ .databricks/
+│  └─ bundle/
+├─ .git/
+├─ .github/
+│  └─ workflows/
+├─ .venv/                          # Local virtual environment
+├─ AGENTS.md                       # Workspace agent development guide
+├─ CLAUDE.md                       # Auxiliary documentation
+├─ README.md                       # Project overview, quickstart, deployment
+├─ app.yaml                        # Databricks Apps runtime config
+├─ databricks.yml                  # DAB bundle config & resources
+├─ manifest.yaml                   # Bundle manifest
+├─ pyproject.toml                  # Project metadata, deps, uv scripts
+├─ uv.lock                         # Lockfile for uv
+├─ agent_server/
+│  ├─ __init__.py
+│  ├─ agent.py                     # Core agent logic (ResponsesAgent)
+│  ├─ evaluate_agent.py            # MLflow evaluation harness
+│  ├─ start_server.py              # Server / AgentServer startup entrypoint
+│  └─ utils.py                     # Helpers (auth, tracing, utilities)
+└─ scripts/
+   ├─ __init__.py
+   ├─ discover_tools.py            # Discover Databricks tools
+   ├─ grant_lakebase_permissions.py# Lakebase permission helper
+   ├─ preflight.py                 # Local environment preflight checks
+   ├─ quickstart.py                # Quickstart/setup automation
+   └─ start_app.py                 # Start server + chat UI locally

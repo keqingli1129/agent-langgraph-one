@@ -1,0 +1,90 @@
+start_app.py — Line-by-line explanation
+
+File summary:
+- Purpose: Start and coordinate frontend and backend developer processes for local development. Ensures both services are ready before reporting success, exits as soon as either fails, and prints helpful logs.
+- Main behaviors: port availability checks, optional cloning/building of a frontend app, start backend and frontend subprocesses, monitor stdout for readiness patterns, terminate both if either fails, and print last log lines on failure.
+
+Imports:
+- argparse — CLI parsing.
+- os, re, shutil, socket, subprocess, sys, threading, time, pathlib.Path — OS and process management, regex, filesystem helpers, concurrency, and timing.
+- dotenv.load_dotenv — load .env values for runtime overrides.
+
+Non-obvious behaviors / external dependencies:
+- Uses `uv run start-server` command to start the backend; relies on `uv` task runner being available.
+- Optionally clones a subdirectory `e2e-chatbot-app-next` from `databricks/app-templates` using git sparse-checkout if missing; requires git and network access.
+- Detects readiness by matching regex patterns in stdout of processes; patterns are configured in `BACKEND_READY` and `FRONTEND_READY`.
+- If an existing `DATABRICKS_APP_NAME` environment variable is not set, the script enforces port availability checks to avoid collisions.
+- Uses line-buffered subprocess stdout (text mode, bufsize=1) and spawns threads to stream and detect readiness concurrently.
+- Writes `backend.log` and `frontend.log` (if UI enabled) and prints the last 50 lines on error.
+
+Questions / ambiguous points:
+- Should `clone_frontend_if_needed` support a specific branch or shallow depth to reduce clone size?
+- Are there alternative readiness signals for the frontend (different dev servers) that should be matched?
+
+Line-by-line explanation (grouped by sections)
+
+1: #!/usr/bin/env python3
+- Shebang for Python 3.
+
+3-12: Module docstring
+- Describes goals: both ready, exit on either failure, print logs. Usage note: all options passed to backend `start-server`.
+
+14-23: Imports
+- Standard libs and `dotenv.load_dotenv`.
+
+26-27: BACKEND_READY and FRONTEND_READY patterns
+- Regex patterns used to detect when backend or frontend are ready by scanning stdout lines.
+
+30-37: def check_port_available(port: int) -> bool:
+- Try connecting to localhost:port. If connection succeeds something is listening => port unavailable; connection refused/OSError means available. Timeout set to 1s.
+
+40-68: class ProcessManager: __init__
+- Initializes state: process handles and readiness flags, threading.Event() `failed` to signal failure, file handles for logs, port and no_ui flag.
+
+70-114: check_ports(self)
+- Check backend port (self.port) availability.
+- If UI enabled, determine frontend port from `CHAT_APP_PORT` or `PORT` env vars (default 3000) and ensure it doesn't collide with backend port.
+- Collect errors if ports are in use; print instructions to free ports and exit if any error.
+
+116-147: monitor_process(self, process, name, log_file, patterns)
+- Continuously read lines from process.stdout using `iter(process.stdout.readline, "")`.
+- Write each line to the log file and print prefixed with `[name]`.
+- Check each line against readiness patterns (case-insensitive). When matched, mark corresponding ready flag and print a ready message. If both ready (or backend only when no_ui), print final readiness message with URLs.
+- After loop, `process.wait()` and if return code != 0 mark `failed` event. On monitoring exception, print error and set failed.
+
+149-185: clone_frontend_if_needed(self)
+- If `e2e-chatbot-app-next` folder already exists, return True.
+- Attempt to clone `databricks/app-templates.git` sparsely into `temp-app-templates` from two URLs (HTTPS, SSH). Uses `git clone --filter=blob:none --sparse`. If cloning fails for both URLs, print error and return False with a manual download hint.
+- After cloning, run `git sparse-checkout set e2e-chatbot-app-next` in `temp-app-templates`, then move the folder to `e2e-chatbot-app-next` and clean up.
+
+187-204: start_process(self, cmd, name, log_file, patterns, cwd=None)
+- Spawn a subprocess.Popen with stdout pipe, stderr redirected to stdout, text mode, bufsize=1 for line buffering, optional cwd. Start a daemon thread to monitor its stdout via `monitor_process`. Return the process object.
+
+206-217: print_logs(self, log_path)
+- Print last 50 lines of a given log file (`backend.log` / `frontend.log`) for diagnostic after a failure.
+
+219-248: cleanup(self)
+- Print shutdown header.
+- For backend and frontend processes, attempt graceful termination (`terminate()` + wait 5s), else `kill()`.
+- Close open log file handles if present.
+
+250-366: run(self, backend_args=None)
+- Load .env file from project root to override env vars.
+- If `DATABRICKS_APP_NAME` not set, call `check_ports()` to enforce port availability checks.
+- If UI enabled, attempt `clone_frontend_if_needed`; if failure, warn and switch to `no_ui=True`. Otherwise set `API_PROXY` env var so frontend dev server proxies requests to backend `/invocations`.
+- Open `backend.log` and `frontend.log` (if UI enabled) in write mode with line buffering.
+- Build backend command `uv run start-server` and extend with `backend_args` collected from CLI.
+- Start backend process via `start_process` with BACKEND_READY patterns. If UI enabled, run `npm install` and `npm run build` in frontend directory; on failure return 1. Then start frontend via `npm run start` monitored with FRONTEND_READY.
+- Print monitoring header with PIDs.
+- Loop until `failed` event set, polling processes' `.poll()` to detect exit. If either exits, set failed.
+- Determine which process failed (backend or frontend) and print error header with exit code. Print last logs (backend.log, frontend.log) and return exit code.
+- On KeyboardInterrupt return 0. In `finally` call `cleanup()`.
+
+368-399: def main():
+- Parse `--no-ui` flag and collect `backend_args` via `parse_known_args()` so all other args pass through to `start-server`.
+- Extract `--port` value from backend_args to set ProcessManager port (default 8000) — loop through args and parse int value after `--port`.
+- Instantiate ProcessManager(port=port, no_ui=args.no_ui).run(backend_args) and `sys.exit` with returned code.
+
+401-403: if __name__ == "__main__": main()
+- Standard entrypoint.
+

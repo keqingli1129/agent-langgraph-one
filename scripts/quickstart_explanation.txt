@@ -1,0 +1,163 @@
+quickstart.py — Line-by-line explanation
+
+File summary:
+- Purpose: Interactive quickstart and setup script to configure local development for the Databricks agent template. It checks prerequisites, sets up .env, authenticates Databricks CLI profiles, optionally binds to existing Databricks app resources, creates or reuses an MLflow experiment, provisions or configures Lakebase (autoscaling or provisioned), and updates `databricks.yml` and `.env` accordingly.
+- Main functions: `_load_yml`, `_save_yml`, `check_prerequisites`, `check_missing_prerequisites`, `check_node_version`, `setup_env_file`, `update_env_file`, Databricks auth helpers, MLflow experiment creation, Lakebase setup and validation, `update_databricks_yml_lakebase`, and `main` orchestration.
+
+Imports:
+- argparse, json, os, platform, re, secrets, shutil, subprocess, sys, pathlib.Path — core utilities and CLI handling.
+- ruamel.yaml — round-trip YAML reading/writing preserving comments/formatting.
+
+Non-obvious behaviors / external dependencies:
+- Requires `databricks` CLI, `uv` task runner, Node.js/npm for frontend tooling, and `ruamel.yaml` Python package.
+- Interacts with Databricks REST APIs via the `databricks` CLI and uses the Databricks Python SDK (`WorkspaceClient`) when available.
+- Updates `databricks.yml` carefully to insert or modify Lakebase environment variable blocks and resource blocks while preserving formatting and comments.
+- Handles both autoscaling and provisioned Lakebase variants; can create autoscaling project + branch via the SDK.
+- Many operations are interactive; script supports non-interactive flags to drive CI usage.
+
+Questions / ambiguous points:
+- Should updates to `databricks.yml` be validated with a YAML schema or backed up before modifications?
+- Any additional Lakebase env keys or resource patterns to support for non-standard templates?
+
+Line-by-line explanation (high-level grouped by function)
+
+1: #!/usr/bin/env python3
+- Shebang.
+
+3-36: Module docstring
+- Describes quickstart steps and CLI options.
+
+38-53: Imports
+- Standard library imports; `ruamel.yaml` for safe round-trip YAML editing.
+
+56-64: _load_yml(path: Path)
+- Load YAML using `ruamel.yaml` in round-trip mode: preserves comments/formatting and returns (yaml, data).
+
+67-71: _save_yml(yaml, data, path)
+- Save YAML back to file using same `yaml` instance to preserve style.
+
+74-90: print_header / print_step / print_success / print_error / print_troubleshooting_* helpers
+- Small helper functions for consistent CLI output and troubleshooting guidance.
+
+93-98: command_exists(cmd: str) -> bool
+- Use `shutil.which` to check for command in PATH.
+
+101-119: run_command(...) -> subprocess.CompletedProcess
+- Run external commands with merged environment and optional output capture or streaming.
+
+122-128: get_command_output(cmd)
+- Convenience wrapper to return stripped stdout from a command.
+
+131-157: check_prerequisites() -> dict
+- Check for presence of `uv`, `node`, `npm`, and `databricks` commands. Print versions when available and return dict of booleans.
+
+160-190: check_missing_prerequisites(prereqs) -> list
+- Build human-friendly install instructions for missing tools (nvm/node, databricks CLI, uv). Adds a note for Windows differences.
+
+193-240: check_node_version() -> str | None
+- Ensure Node.js version meets Vite's supported versions (>=20.19, >=22.12, >=23). Returns `None` when OK, otherwise returns an error message recommending `nvm install`.
+
+243-263: setup_env_file()
+- Create `.env` from `.env.example` if not present; otherwise create a minimal `.env` with default `DATABRICKS_CONFIG_PROFILE=DEFAULT` and MLflow defaults.
+
+266-314: update_env_file(key, value)
+- Update or insert `KEY=VALUE` in `.env`. If a commented-out key exists, replace it in-place to preserve ordering. Removes duplicates and appends if missing. Uses regex patterns to locate active/commented lines.
+
+317-354: get_databricks_profiles() -> list[dict]
+- Parse `databricks auth profiles` CLI output to extract existing profile names for interactive selection. Returns empty list if none found.
+
+357-368: validate_profile(profile_name) -> bool
+- Use `databricks current-user me` with `DATABRICKS_CONFIG_PROFILE` set to test whether the profile is authenticated.
+
+371-389: authenticate_profile(profile_name, host=None) -> bool
+- Run `databricks auth login --profile <name>` optionally with `--host` interactively in a subprocess so user can complete OAuth flow in browser.
+
+392-418: select_profile_interactive(profiles)
+- Let user pick from listed profiles by number interactively.
+
+421-486: setup_databricks_auth(profile_arg=None, host_arg=None) -> str
+- Main auth logic: if `--profile` provided use it; otherwise list and let user select or create a new `DEFAULT` profile using the provided host or prompt. Validate or authenticate as needed; on success update `.env` with `DATABRICKS_CONFIG_PROFILE` and `MLFLOW_TRACKING_URI`.
+
+489-501: get_databricks_host(profile_name) -> str
+- Use `databricks auth env --profile <name> --output json` to obtain `DATABRICKS_HOST` and return its URL (rstrip '/'). Falls back to empty string on failure.
+
+504-514: get_databricks_username(profile_name) -> str
+- Use SDK `WorkspaceClient(profile)` and `w.current_user.me().user_name` to return username, or on failure print troubleshooting and exit.
+
+517-587: create_mlflow_experiment(profile_name, username) -> (name, id)
+- Use SDK to create or reuse an MLflow experiment under `/Users/{username}/agents-on-apps`. If experiment ID exists in `.env`, try to reuse it. If name already exists, create with a random suffix. On failures, print troubleshooting and exit.
+
+590-600: check_lakebase_required() -> bool
+- Read `databricks.yml` presence and check if it contains `LAKEBASE_INSTANCE_NAME` or `LAKEBASE_AUTOSCALING_ENDPOINT` indicating Lakebase is needed.
+
+603-614: get_env_value(key) -> str
+- Read `.env` and return the given key's value, stripping quotes. Returns empty string if not present.
+
+617-636: get_existing_lakebase_config() -> dict | None
+- Read `.env` for LAKEBASE_AUTOSCALING_ENDPOINT or LAKEBASE_INSTANCE_NAME and return a small dict describing existing config.
+
+639-649: validate_lakebase_config(profile_name, config) -> bool
+- Validate either a provisioned instance or autoscaling endpoint by calling `validate_lakebase_instance` or `validate_lakebase_autoscaling_endpoint`.
+
+652-659: get_workspace_client(profile_name)
+- Instantiate `databricks.sdk.WorkspaceClient(profile=profile_name)` inside a try/except and return the client or None.
+
+662-695: get_app_resources(profile_name, app_name) -> list[dict]
+- Fetch `databricks -p <profile> apps get <app> --output json` and parse `resources` array, returning it; on failure returns empty list.
+
+698-755: create_lakebase_instance(profile_name) -> dict
+- Use the SDK to create a new Lakebase autoscaling project and branch, then resolve endpoint info via `validate_lakebase_autoscaling_endpoint`. Returns dict with endpoint, host, branch, database, or exits on failure.
+
+758-793: _fetch_autoscaling_endpoint_info(profile_name, project, branch) -> (endpoint, host)
+- Use `databricks api get /api/2.0/postgres/projects/{project}/branches/{branch}/endpoints` to list endpoints and return the first endpoint name and host. Returns empty pair if none found.
+
+796-838: select_lakebase_interactive(profile_name) -> dict
+- Interactive flow: create new instance or use existing. For existing, choose autoscaling or provisioned and return corresponding dict; for autoscaling ask endpoint name.
+
+841-895: validate_lakebase_instance(profile_name, lakebase_name) -> dict | None
+- Call `databricks -p <profile> database get-database-instance <name>` and parse JSON to validate. Handle old CLI not having `database` command and common error messages (not found, permission denied).
+
+898-1000: validate_lakebase_autoscaling_endpoint(profile_name, endpoint) -> dict | None
+- Call `databricks -p <profile> api get <api_path>` to fetch endpoint info, then call databases API to find database name for branch. Returns dict with endpoint, host, branch, and database; otherwise prints errors and returns None.
+
+1003-1224: setup_lakebase(profile_name, username, provisioned_name=None, autoscaling_endpoint=None, purpose='memory') -> dict
+- Top-level lakebase configuration logic. If `provisioned_name` is provided, validate and save instance name and PG env vars. If `autoscaling_endpoint` provided, validate and save endpoint and PG env vars. Otherwise run interactive selection. Finally return selection with details.
+
+1227-1259: _replace_lakebase_env_vars(content: str, lakebase_config: dict) -> str
+- Parse `databricks.yml` content lines and replace LAKEBASE-related `- name: LAKEBASE_*` env var entries with only the relevant ones for the chosen config. Preserves formatting, handles commented blocks and value/value_from keys.
+
+1262-1282: _build_postgres_resource_lines(indent: str, lakebase_config: dict) -> list[str]
+- Build the YAML lines for a `postgres` resource block given the lakebase config (branch/database/permission).
+
+1285-1581: _replace_lakebase_resource(content: str, lakebase_config: dict) -> str
+- Long function that edits the `resources` section of `databricks.yml`. It searches for commented or uncommented `database` (provisioned) and `postgres` (autoscaling) resource blocks, removes or replaces them appropriately, and inserts updated resource blocks. Handles indent detection and fallback insertion points. Returns updated YAML content.
+
+1584-1602: _find_last_resource_insert_idx(lines: list[str]) -> int | None
+- Helper to find where to append new resource entries (after the last `- name:` resource item).
+
+1605-1617: update_databricks_yml_lakebase(lakebase_config: dict) -> None
+- Read `databricks.yml`, call `_replace_lakebase_env_vars` and `_replace_lakebase_resource`, and write file if changed.
+
+1620-1648: get_databricks_yml_experiment_id() -> str
+- Read `databricks.yml` using `_load_yml` and find `resources.apps.*.resources.*.experiment.experiment_id` if present, returning it for re-use.
+
+1651-1666: update_databricks_yml_experiment(experiment_id: str) -> None
+- Update `databricks.yml` by setting `experiment.experiment_id` for app resources, using `ruamel.yaml` and preserving formatting.
+
+1669-1712: update_databricks_yml_app_name(app_name: str, budget_policy_id: str | None = None) -> str
+- Replace the bundle's `resources.apps.<key>.name` value with `app_name` (quoted), optionally inserting/updating `budget_policy_id`. Save and return the app resource key.
+
+1715-2134: main()
+- CLI parsing and the full quickstart orchestration:
+  - Check prerequisites and Node version
+  - Setup `.env`
+  - Setup Databricks authentication (profile)
+  - Optionally bind to existing app and extract resources (experiment, postgres, database) and set `lakebase_config`
+  - Create or reuse MLflow experiment and update `.env` and `databricks.yml`
+  - Determine if Lakebase is required and configure/validate/create instance or endpoint, update `.env` and `databricks.yml` accordingly
+  - Print final summary with links to experiment and Lakebase resources
+  - Handles KeyboardInterrupt to exit gracefully
+
+2140-2143: if __name__ == "__main__": main()
+- Run main when executed directly.
+

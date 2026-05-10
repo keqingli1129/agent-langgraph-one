@@ -1,0 +1,337 @@
+grant_lakebase_permissions.py — Line-by-line explanation
+
+File summary:
+- Purpose: Grant Lakebase (Postgres) permissions to a Databricks Apps service principal so the agent's memory tables/sequences are accessible.
+- Main functions: `_grant_permissions` (performs grants via LakebaseClient helpers) and `main` (parses CLI args, selects Lakebase instance/project/branch, creates role for SP, calls `_grant_permissions`).
+
+Imports:
+- `argparse` — parse CLI arguments.
+- `os`, `sys` — environment variables and stderr/exit.
+- `dotenv.load_dotenv` — load .env variables.
+- `databricks_ai_bridge.lakebase` (used inside functions) — Lakebase client and privilege enums.
+- `re` — regex used conditionally to parse autoscaling endpoint.
+
+Non-obvious behaviors / external dependencies:
+- Requires `databricks_ai_bridge.lakebase` package and Lakebase access.
+- Reads LAKEBASE_* env vars from `.env` via `load_dotenv()`.
+- Supports both provisioned Lakebase instances (`--instance-name`) and autoscaling endpoints (project+branch or `--autoscaling-endpoint`).
+- Creates a role for the service principal (type "SERVICE_PRINCIPAL"); if role exists, it continues.
+- Grants schema/table privileges and sequence privileges; many grants are guarded with try/except and will warn (not fail) if objects don't exist yet.
+- Uses conventions: `is_mcp_connection` style in other scripts; here sequence/list schema names are configured in constants.
+- Some behavior depends on database schema names and presence of tables; fresh branches may require re-running after first agent run.
+
+Questions / ambiguous points:
+- Should failures be surfaced more verbosely or logged to a file?
+- Any additional schemas/tables that should be included for other memory types?
+- Should role creation use a more specific role name or annotations?
+
+Line-by-line explanation (line number : code — concise explanation)
+
+1: """Grant Lakebase Postgres permissions to a Databricks Apps service principal.
+- Module docstring start: describes purpose.
+
+2-15: (docstring continued)
+- Explains usage examples and supported memory types; shows CLI examples for provisioned and autoscaling instances.
+
+17: import argparse
+- Import argument parsing module.
+
+18: import os
+- Import OS for env vars.
+
+19: import sys
+- Import sys for stderr and exit.
+
+21: from dotenv import load_dotenv
+- Import `load_dotenv` to load `.env` variables.
+
+23: load_dotenv()
+- Load environment variables from `.env` into process env.
+
+26-28: # Schema for memory tables...
+- Comment explaining `MEMORY_SCHEMA` default and env override.
+
+29: MEMORY_SCHEMA = os.getenv("LAKEBASE_AGENT_MEMORY_SCHEMA", "public")
+- Read `LAKEBASE_AGENT_MEMORY_SCHEMA` env var or default to "public".
+
+32-65: # Per-memory-type schema -> table definitions.
+- Define `MEMORY_TYPE_SCHEMAS`: mapping of memory types ("langgraph", "openai") to schema -> list of table names used by that memory type.
+
+32: MEMORY_TYPE_SCHEMAS: dict[str, dict[str, list[str]]] = {
+- Type-annotated constant mapping memory types to schemas and tables.
+
+33-48: "langgraph": { MEMORY_SCHEMA: [...], "agent_server": [...] },
+- For `langgraph` memory type: list of tables in `MEMORY_SCHEMA` and `agent_server` schema.
+
+49-63: "openai": { MEMORY_SCHEMA: [...], "agent_server": [...] },
+- For `openai` memory type: list of tables in `MEMORY_SCHEMA` and `agent_server`.
+
+66-68: # Memory types that need sequence privileges (auto-increment columns)
+- Comment about sequence privileges needed for certain memory types.
+
+69: NEEDS_SEQUENCES = {
+- Mapping memory type to schemas requiring sequence privileges.
+
+70:     "openai": [MEMORY_SCHEMA, "agent_server"],
+71:     "langgraph": ["agent_server"],
+72: }
+- `openai` needs sequences in MEMORY_SCHEMA and agent_server; `langgraph` needs agent_server.
+
+75-80: # Shared schemas that need sequence privileges...
+- Explain `SHARED_SEQUENCE_SCHEMAS` which contains "drizzle" because Drizzle uses SERIAL primary key.
+
+81: SHARED_SEQUENCE_SCHEMAS = ["drizzle"]
+- Shared sequence schemas list.
+
+84-87: # Shared schemas granted for all memory types (chat UI persistence)
+- Comment about `SHARED_SCHEMAS` mapping.
+
+88: SHARED_SCHEMAS: dict[str, list[str]] = {
+- Map of shared schema -> table names used across memory types.
+
+89-92: "ai_chatbot": ["Chat", "Message", "User", "Vote"], "drizzle": ["__drizzle_migrations"],
+- Two shared schemas: `ai_chatbot` tables and `drizzle` migrations table.
+
+96: def _grant_permissions(client, grantee: str, memory_type: str):
+- Define helper to grant permissions using a Lakebase client, target grantee role, and memory type.
+
+97:     """Grant all permissions for the given memory type to the grantee role."""
+- Docstring for helper.
+
+98-102:     from databricks_ai_bridge.lakebase import (
+        SchemaPrivilege,
+        SequencePrivilege,
+        TablePrivilege,
+    )
+- Import privilege enums from Lakebase bridge inside function (delays dependency until needed).
+
+105-107:     # Build schema -> tables map
+- Prepare map of schemas to tables to grant by merging shared schemas and memory-type schemas.
+
+108:     schema_tables: dict[str, list[str]] = dict(SHARED_SCHEMAS)
+- Start with a shallow copy of `SHARED_SCHEMAS`.
+
+109-110:     for schema, tables in MEMORY_TYPE_SCHEMAS[memory_type].items():
+111:         schema_tables.setdefault(schema, []).extend(tables)
+- Merge tables from the selected memory type into `schema_tables`.
+
+113:     schema_privileges = [SchemaPrivilege.USAGE, SchemaPrivilege.CREATE]
+- Schema-level privileges to grant: USAGE and CREATE.
+
+114-119:     table_privileges = [
+        TablePrivilege.SELECT,
+        TablePrivilege.INSERT,
+        TablePrivilege.UPDATE,
+        TablePrivilege.DELETE,
+    ]
+- Table-level privileges to grant: SELECT, INSERT, UPDATE, DELETE.
+
+121:     for schema, tables in schema_tables.items():
+- Iterate each schema and its tables to grant privileges.
+
+122:         print(f"Granting schema privileges on '{schema}'...")
+- Informational print.
+
+124-129:         try:
+            client.grant_schema(
+                grantee=grantee, schemas=[schema], privileges=schema_privileges
+            )
+        except Exception as e:
+            print(f"  Warning: schema grant failed (may not exist yet): {e}")
+- Attempt to grant schema privileges via client.grant_schema; on error print warning (non-fatal).
+
+131:         qualified_tables = [f"{schema}.{t}" for t in tables]
+- Build fully-qualified table names list (schema.table).
+
+132:         print(f"  Granting table privileges on {qualified_tables}...")
+- Informational print.
+
+134-139:         try:
+            client.grant_table(
+                grantee=grantee, tables=qualified_tables, privileges=table_privileges
+            )
+        except Exception as e:
+            print(f"  Warning: table grant failed (may not exist yet): {e}")
+- Attempt to grant table privileges; on failure print warning.
+
+142-143:     # Grant sequence privileges (auto-increment columns).
+- Comment introducing sequence grants.
+
+144:     seq_schemas = list(SHARED_SEQUENCE_SCHEMAS)
+- Start seq_schemas with shared ones.
+
+145:     if memory_type in NEEDS_SEQUENCES:
+146:         seq_schemas.extend(NEEDS_SEQUENCES[memory_type])
+- If selected memory type needs sequences, extend seq_schemas.
+
+148:     for schema in seq_schemas:
+- Loop schemas requiring sequence grants.
+
+149:         print(f"Granting sequence privileges on '{schema}' schema...")
+- Informational print.
+
+151-158:         try:
+            client.grant_all_sequences_in_schema(
+                grantee=grantee,
+                schemas=[schema],
+                privileges=[
+                    SequencePrivilege.USAGE,
+                    SequencePrivilege.SELECT,
+                    SequencePrivilege.UPDATE,
+                ],
+            )
+        except Exception as e:
+            print(f"  Warning: sequence grant failed (may not exist yet): {e}")
+- Attempt to grant sequence privileges for all sequences in schema; warn on failure.
+
+160-168:     print(
+        "\nPermission grants complete. If some grants failed because tables don't "
+        "exist yet, that's expected on a fresh branch — they'll be created on first "
+        "agent usage. Re-run this script after the first run to grant remaining permissions."
+    )
+- Final informational message explaining re-run on fresh branches.
+
+172: def main():
+- Define main entrypoint for script.
+
+173-176:     parser = argparse.ArgumentParser(
+        description="Grant Lakebase permissions to an app service principal."
+    )
+- Create CLI parser with description.
+
+177-184:     parser.add_argument(
+        "sp_client_id",
+        help="Service principal client ID (UUID). Get it via: "
+        "databricks apps get <app-name> --output json "
+        "| jq -r '.service_principal_client_id'",
+    )
+- Positional arg `sp_client_id` with help how to obtain it via `databricks` CLI.
+
+185-191:     parser.add_argument(
+        "--memory-type",
+        required=True,
+        choices=list(MEMORY_TYPE_SCHEMAS.keys()),
+        help="Memory type to grant permissions for",
+    )
+- Required `--memory-type` argument; choices derived from keys of `MEMORY_TYPE_SCHEMAS` mapping.
+
+192-199:     parser.add_argument(
+        "--instance-name",
+        default=os.getenv("LAKEBASE_INSTANCE_NAME"),
+        help="Lakebase instance name for provisioned instances (default: LAKEBASE_INSTANCE_NAME from .env)",
+    )
+- Optional `--instance-name` (provisioned), default from env var.
+
+200-209:     parser.add_argument(
+        "--autoscaling-endpoint",
+        default=os.getenv("LAKEBASE_AUTOSCALING_ENDPOINT"),
+        help="Lakebase autoscaling endpoint path (default: LAKEBASE_AUTOSCALING_ENDPOINT from .env). "
+        "e.g. projects/<project>/branches/<branch>/endpoints/primary",
+    )
+- Optional `--autoscaling-endpoint`, default from env var; expected form includes project/branch.
+
+210-217:     parser.add_argument(
+        "--project",
+        default=os.getenv("LAKEBASE_AUTOSCALING_PROJECT"),
+        help="Lakebase autoscaling project name (default: LAKEBASE_AUTOSCALING_PROJECT from .env)",
+    )
+- Optional `--project` for autoscaling.
+
+218-224:     parser.add_argument(
+        "--branch",
+        default=os.getenv("LAKEBASE_AUTOSCALING_BRANCH"),
+        help="Lakebase autoscaling branch name (default: LAKEBASE_AUTOSCALING_BRANCH from .env)",
+    )
+- Optional `--branch` for autoscaling.
+
+225:     args = parser.parse_args()
+- Parse CLI arguments into `args`.
+
+227:     has_provisioned = bool(args.instance_name)
+- Boolean: whether a provisioned instance name was provided.
+
+228:     has_autoscaling = bool(args.project and args.branch)
+- Boolean: whether autoscaling project+branch provided.
+
+231-233:     # Parse project/branch from --autoscaling-endpoint if provided
+- Comment: will attempt to parse project/branch from `--autoscaling-endpoint`.
+
+234:     if args.autoscaling_endpoint and not has_autoscaling and not has_provisioned:
+- If user provided endpoint but not project/branch nor instance, attempt to parse.
+
+235:         import re
+- Import regex module locally.
+
+237:         m = re.match(r"projects/([^/]+)/branches/([^/]+)", args.autoscaling_endpoint)
+- Regex match to capture project and branch from endpoint path.
+
+238:         if m:
+239:             args.project = m.group(1)
+240:             args.branch = m.group(2)
+241:             has_autoscaling = True
+- If matched, set project and branch and mark autoscaling true.
+
+242-250:         else:
+            print(
+                f"Error: Could not parse project/branch from endpoint '{args.autoscaling_endpoint}'.\n"
+                "  Expected format: projects/<project>/branches/<branch>/endpoints/<endpoint>",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+- If parsing fails, print error to stderr and exit with code 1.
+
+252-264:     if not has_provisioned and not has_autoscaling:
+        print(
+            "Error: Lakebase connection is required. Provide one of:\n"
+            "  Provisioned:  --instance-name <name>  (or set LAKEBASE_INSTANCE_NAME in .env)\n"
+            "  Autoscaling:  --autoscaling-endpoint <endpoint>  (or set LAKEBASE_AUTOSCALING_ENDPOINT in .env)\n"
+            "  Autoscaling:  --project <proj> --branch <branch>  (or set LAKEBASE_AUTOSCALING_PROJECT + LAKEBASE_AUTOSCALING_BRANCH in .env)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+- If neither connection method supplied, print usage guidance and exit.
+
+266:     from databricks_ai_bridge.lakebase import LakebaseClient
+- Import `LakebaseClient` from bridge package inside main (deferred until needed).
+
+268-274:     with LakebaseClient(
+        instance_name=args.instance_name or None,
+        project=args.project or None,
+        branch=args.branch or None,
+    ) as client:
+- Create and enter LakebaseClient context using either provisioned instance or project/branch; ensures client closed automatically.
+
+275-277:         if has_provisioned:
+            print(f"Using provisioned instance: {args.instance_name}")
+        else:
+            print(f"Using autoscaling project: {args.project}, branch: {args.branch}")
+- Print whether using provisioned instance or autoscaling project/branch.
+
+278:         print(f"Memory type: {args.memory_type}")
+- Print selected memory type.
+
+280:         grantee = args.sp_client_id
+- Set `grantee` variable to provided service principal client ID.
+
+281:         print(f"Creating role for SP {grantee}...")
+- Informational print before creating role.
+
+283-291:         try:
+            client.create_role(grantee, "SERVICE_PRINCIPAL")
+            print("  Role created.")
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                print("  Role already exists, skipping.")
+            else:
+                raise
+- Attempt to create role for the SP via client.create_role. If role already exists, print and continue; otherwise re-raise error.
+
+293:         _grant_permissions(client, grantee, args.memory_type)
+- Call helper to perform schema/table/sequence grants.
+
+297: if __name__ == "__main__":
+- Script entrypoint check.
+
+298:     main()
+- Call `main()` to execute script.
+

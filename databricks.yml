@@ -45,3 +45,4 @@ targets:
       apps:
         agent_langgraph:
           name: agent-langgraph
+          source_code_path: /path/to/source/code

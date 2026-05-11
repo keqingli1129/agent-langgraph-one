@@ -225,3 +225,4 @@ sketch
 **/.env
 **/.env.local
 load-test-runs/
+e2e-chatbot-app-next/
